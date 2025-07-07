@@ -1,20 +1,20 @@
 /*******************************
- * server.js
- * PDF Editor API — Multi-Page + Image Insert
+ * server.js - JSON Annotations
+ * For Google Apps Script integration
  *******************************/
 
-require('dotenv').config(); // Load .env variables
+require('dotenv').config();
 
 const express = require('express');
-const multer = require('multer');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const axios = require('axios');
 
 const app = express();
-const upload = multer();
+app.use(express.json({ limit: '50mb' })); // Handle large PDFs
 
-// ✅ API Key Middleware
+// ✅ API Key Middleware (checks header or JSON body)
 app.use((req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
+  const apiKey = req.headers['x-api-key'] || req.body.apiKey;
   console.log("Client sent API key:", apiKey);
   console.log("Expected API key:", process.env.API_KEY);
 
@@ -29,82 +29,61 @@ app.get('/', (req, res) => {
   res.send('✅ PDF Editor API is running!');
 });
 
-// ✅ Multi-page editing + image insert route
-app.post(
-  '/edit-pdf',
-  upload.fields([{ name: 'pdf' }, { name: 'image', maxCount: 1 }]),
-  async (req, res) => {
-    try {
-      if (!req.files || !req.files['pdf']) {
-        return res.status(400).json({ error: 'No PDF uploaded.' });
-      }
+// ✅ JSON-based PDF editing with coordinates & image support
+app.post('/edit-pdf', async (req, res) => {
+  try {
+    const { base64Pdf, annotations } = req.body;
 
-      // Load the uploaded PDF
-      const pdfBytes = req.files['pdf'][0].buffer;
-      const pdfDoc = await PDFDocument.load(pdfBytes);
-
-      // Embed a font for text
-      const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      const pages = pdfDoc.getPages();
-
-      // 🖼️ Embed image if provided
-      let pngImage, imageDims;
-      if (req.files['image']) {
-        const imageBytes = req.files['image'][0].buffer;
-        pngImage = await pdfDoc.embedPng(imageBytes);
-        imageDims = pngImage.scale(0.3); // scale the image as needed
-      }
-
-      // 📝 Loop through all pages
-      pages.forEach((page, idx) => {
-        const { width, height } = page.getSize();
-
-        // ✅ Add text
-        page.drawText(`This is Page ${idx + 1} edited!`, {
-          x: 50,
-          y: height - 50,
-          size: 18,
-          font: helveticaFont,
-          color: rgb(0, 0, 1), // blue text
-        });
-
-        // ✅ Draw rectangle highlight
-        page.drawRectangle({
-          x: 50,
-          y: height - 100,
-          width: 200,
-          height: 30,
-          color: rgb(0.95, 0.1, 0.1),
-          opacity: 0.5,
-        });
-
-        // ✅ Insert image/stamp/signature in bottom-right
-        if (pngImage) {
-          page.drawImage(pngImage, {
-            x: width - imageDims.width - 50,
-            y: 50,
-            width: imageDims.width,
-            height: imageDims.height,
-          });
-        }
-      });
-
-      // Save the edited PDF
-      const editedPdfBytes = await pdfDoc.save();
-
-      // Send back the PDF
-      res.set({
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename="edited.pdf"',
-      });
-      res.send(Buffer.from(editedPdfBytes));
-
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'Failed to edit PDF.' });
+    if (!base64Pdf || !annotations) {
+      return res.status(400).json({ error: 'Missing base64Pdf or annotations' });
     }
+
+    // Load PDF
+    const pdfBytes = Buffer.from(base64Pdf, 'base64');
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+    for (const annotation of annotations) {
+      const pageIndex = parseInt(annotation.pages); // zero-based
+      const page = pdfDoc.getPage(pageIndex);
+
+      if (annotation.text) {
+        // ✅ Draw text
+        page.drawText(annotation.text, {
+          x: annotation.x,
+          y: annotation.y,
+          size: annotation.size || 12,
+          font: helveticaFont,
+          color: rgb(0, 0, 1) // blue text
+        });
+      } else if (annotation.type === 'image' && annotation.imageUrl) {
+        // ✅ Fetch image from URL
+        const response = await axios.get(annotation.imageUrl, { responseType: 'arraybuffer' });
+        const imgBytes = response.data;
+        const img = await pdfDoc.embedPng(imgBytes);
+        page.drawImage(img, {
+          x: annotation.x,
+          y: annotation.y,
+          width: annotation.width || 100,
+          height: annotation.height || 50
+        });
+      }
+    }
+
+    const finalPdfBytes = await pdfDoc.save();
+    const base64Edited = Buffer.from(finalPdfBytes).toString('base64');
+
+    res.status(200).json({
+      status: 'success',
+      message: 'PDF edited successfully',
+      fileBase64: base64Edited
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to edit PDF.' });
   }
-);
+});
 
 // ✅ Start server
 const PORT = process.env.PORT || 3000;
